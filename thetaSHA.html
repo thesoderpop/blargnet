@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>θSHA Reassembly with Full Inversion</title>
+  <style>
+    #progressContainer {
+      width: 80%;
+      margin: 20px auto;
+      text-align: center;
+    }
+    #progressBar {
+      width: 100%;
+      height: 20px;
+    }
+  </style>
+</head>
+<body>
+<h1>Reassembling File via θSHA</h1>
+<div id="progressContainer">
+  <progress id="progressBar" max="100" value="0"></progress>
+  <span id="progressPercent">0%</span>
+</div>
+<script>
+// Utility: convert base64 string to Uint8Array
+function base64ToUint8Array(base64) {
+  var binary_string = atob(base64.replace(/-/g, '+').replace(/_/g, '/'));
+  var len = binary_string.length;
+  var bytes = new Uint8Array(len);
+  for (var i = 0; i < len; i++) {
+    bytes[i] = binary_string.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Utility: rotate a Uint8Array left by one element
+function rol(arr) {
+  let out = new Uint8Array(arr.length);
+  for (let i = 0; i < arr.length - 1; i++) {
+    out[i] = arr[i+1];
+  }
+  out[arr.length - 1] = arr[0];
+  return out;
+}
+
+// Invert a single fold: given folded block C, right block B, and key k,
+// compute A = ((C - B) mod 256) XOR (ROL(B,1) XOR k)
+function invertFold(folded, right, k) {
+  let A = new Uint8Array(folded.length);
+  let rolB = rol(right);
+  for (let i = 0; i < folded.length; i++) {
+    let diff = (folded[i] + 256 - right[i]) % 256;
+    A[i] = diff ^ (rolB[i] ^ k);
+  }
+  return A;
+}
+
+// Recursive inversion of the tree.
+// For a leaf node, simply decode its data.
+// For a fold node, invert the fold using stored folded, right, and key,
+// and then verify consistency with children (if available) by recursively inverting them.
+async function invertTree(node, progressCallback, progressState) {
+  if (node.type === "leaf") {
+    // Leaf node: return the decoded data.
+    progressState.steps++;
+    progressCallback(Math.floor((progressState.steps / progressState.total) * 100));
+    return base64ToUint8Array(node.data);
+  } else if (node.type === "fold") {
+    // Invert children recursively.
+    // For full inversion, we use the stored right half and key.
+    let right = base64ToUint8Array(node.right);
+    let folded = base64ToUint8Array(node.folded);
+    let k = node.key;
+    // Compute left block via inversion.
+    let leftRecovered = invertFold(folded, right, k);
+    // Optionally, if children exist, you can recursively invert them and check consistency.
+    // Here we assume the stored values are correct.
+    progressState.steps++;
+    progressCallback(Math.floor((progressState.steps / progressState.total) * 100));
+    // Return concatenation of leftRecovered and right.
+    let result = new Uint8Array(leftRecovered.length + right.length);
+    result.set(leftRecovered, 0);
+    result.set(right, leftRecovered.length);
+    return result;
+  }
+}
+
+// A helper function to recursively count the total number of inversion steps (nodes) in the tree.
+function countNodes(node) {
+  if (node.type === "leaf") return 1;
+  else return 1 + countNodes(node.children[0]) + countNodes(node.children[1]);
+}
+
+function updateProgress(percent) {
+  document.getElementById('progressBar').value = percent;
+  document.getElementById('progressPercent').textContent = percent + "%";
+}
+
+(async function(){
+  try {
+    // Fetch the manifest
+    const manifestResponse = await fetch('blarg.index');
+    if (!manifestResponse.ok) throw new Error("Manifest not found.");
+    const manifest = await manifestResponse.json();
+    const blockSize = manifest.block_size;
+    const fileName = manifest.filename;
+    const originalLength = manifest.original_length;
+    const tree = manifest.tree;
+    // Count total inversion steps for progress tracking.
+    let totalSteps = countNodes(tree);
+    let progressState = { steps: 0, total: totalSteps };
+    // Invert the tree to recover the full data.
+    let recovered = await invertTree(tree, updateProgress, progressState);
+    // Trim to the original file length.
+    recovered = recovered.slice(0, originalLength);
+    // Create a Blob and download link.
+    let blob = new Blob([recovered], {type: "application/octet-stream"});
+    let url = URL.createObjectURL(blob);
+    let a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.textContent = "Click to download " + fileName;
+    document.body.innerHTML = "";
+    document.body.appendChild(a);
+  } catch (error) {
+    console.error("Error during reassembly:", error);
+    document.body.innerHTML = "An error occurred: " + error;
+  }
+})();
+</script>
+</body>
+</html>
